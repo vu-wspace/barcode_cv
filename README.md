@@ -19,10 +19,10 @@ Xong ─► Compare: Expected vs Scanned · Scanned vs Visual count
 | Bước | Cách làm |
 |---|---|
 | Box | YOLOE-26 zero-shot với prompt `"box"`. OBB là hình chữ nhật xoay nhỏ nhất bao quanh mask. Tracking dùng ByteTrack (`box_tracker.yaml`). Box được giữ thêm 1 s khi detector bỏ lỡ một frame. |
-| Items | YOLOE-26 prompt-free (khoảng 4.5k lớp), chạy trên cả khung hình với phần ngoài hộp tô đen. Bỏ các lớp chữ/nhãn và mask lớn bằng cả hộp. Chạy mỗi 3 frame. |
+| Items | YOLOE-26 prompt-free (khoảng 4.5k lớp), chạy trên cả khung hình với phần ngoài hộp tô đen. Bỏ các lớp chữ/nhãn và mask lớn bằng cả hộp. Chạy mỗi 3 frame. Khi Compare, chỉ tính item còn thấy trong hộp trong 3 s gần nhất: item đã lấy ra, hoặc tay thò vào rồi rút ra, không còn được tính. |
 | Barcode | OpenCV tìm và đọc barcode trên cả khung hình. Nếu chưa đọc được: cắt theo góc xoay, phóng to x2, làm nét rồi đưa cho zxing. Còn thất bại thì OCR số in dưới vạch (chỉ cho item, chạy nền). Chỉ nhận **EAN-13 đúng checksum** (item) và **Code128** (nhãn vận đơn của hộp). Mã được chọn theo số lần đọc nhiều nhất qua các frame của mỗi track. |
-| box_id | Mã hộp phải đọc được ít nhất 2 lần trong 3 s gần nhất. Mỗi lúc chỉ có một hộp trên bàn. |
-| Seal | YOLOE zero-shot (`"packing tape"`, `"seal sticker"`), chỉ kiểm tra có hay không có seal. |
+| box_id | Mã hộp phải đọc được ít nhất 2 lần trong 3 s gần nhất. Mỗi lúc chỉ có một hộp trên bàn. Khi đã có box_id, chỉ mã nằm trên hộp đang thấy mới đổi được hộp, nên thùng khác phía sau không thay được thùng đang làm. |
+| Seal | YOLOE zero-shot (`"packing tape"`, `"seal sticker"`). Lấy mốc diện tích seal lúc compare ra OK, vì thùng thường có sẵn băng keo. Chỉ tính `sealed` khi diện tích seal tăng thêm ≥ 2% diện tích hộp. |
 
 ## Cài đặt
 
@@ -153,7 +153,7 @@ uv run python barcode_reader.py
 ## Giới hạn đã biết
 
 - **Box zero-shot còn yếu:** bắt được hộp ở khoảng 74% frame. Barcode vẫn đọc trên cả khung hình và box được giữ thêm 1 s để bù, nhưng muốn ổn định thì cần train model OBB.
-- **Seal:** chỉ biết có hay không có seal, chưa phân loại được seal còn nguyên hay bị rách. Cần ảnh đã gán nhãn để train model OBB + classification.
+- **Seal:** dựa vào diện tích seal tăng thêm so với mốc lúc OK, chưa phân loại được seal còn nguyên hay bị rách, và chưa được kiểm chứng với seal thật. Cần ảnh đã gán nhãn để train model OBB + classification.
 - **Barcode trên webcam 1280×720:** mỗi vạch chỉ khoảng 2 px. Frame bị nhòe do chuyển động sẽ không đọc được, nên cầm yên khoảng nửa giây. OCR dự phòng mất khoảng 1,1 s mỗi lần và chỉ đọc mã 13 số.
 - **Đếm trùng:** nếu tracker đổi ID của cùng một item (do bị che hoặc di chuyển nhanh), item đó bị đếm 2 lần.
 - **Tốc độ:** khoảng 7–9 FPS trên CPU khi có hộp trong khung hình.

@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 
 import cv2
-from ultralytics import YOLO
+from ultralytics import YOLO, YOLOE
+
+from inspection import obb_from_mask
 
 DATA = Path("datasets/box_obb")
 
@@ -24,23 +26,32 @@ def save_sample(img, obbs, idx):
 
 
 def collect():
-    # Pseudo-labels from the zero-shot pipeline; you are the reviewer: only save frames where every box is right.
-    from yolo_model import model, obb_from_mask
-
+    # Pseudo-labels from the zero-shot box detector; you are the reviewer: only save frames where every box is right.
+    # Same model, settings and 1280x720 capture as yolo_model.py, so training images look like the real input.
+    # (Not imported from yolo_model: that would also load the item and seal models.)
+    model = YOLOE("yoloe-26s-seg.pt")
+    model.set_classes(["box"], model.get_text_pe(["box"]))
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # driver clamps to the camera's max
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     idx = len(list(DATA.glob("images/*/*.jpg")))  # resume numbering across sessions
-    for r in model.predict(source=0, stream=True, conf=0.15, imgsz=800, verbose=False):
-        polys = r.masks.xy if r.masks is not None else []
-        obbs = [obb_from_mask(p) for p in polys if len(p) >= 3]
-        frame = r.orig_img.copy()
+    while True:
+        ok, img = cap.read()
+        if not ok:
+            break
+        r = model.predict(img, conf=0.12, imgsz=640, verbose=False)[0]  # = BOX_CONF, BOX_IMGSZ in yolo_model.py
+        obbs = [obb_from_mask(p) for p in (r.masks.xy if r.masks is not None else []) if len(p) >= 3]
+        frame = img.copy()
         cv2.polylines(frame, obbs, True, (0, 255, 0), 2)
         cv2.putText(frame, f"saved {idx} | SPACE save, q quit", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.imshow("collect", frame)
         key = cv2.waitKey(1)
         if key == ord(" "):
-            save_sample(r.orig_img, obbs, idx)  # empty obbs = background image, teaches "no box here"
+            save_sample(img, obbs, idx)  # empty obbs = background image, teaches "no box here"
             idx += 1
         elif key == ord("q"):
             break
+    cap.release()
 
 
 def train(epochs=50):

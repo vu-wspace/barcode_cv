@@ -4,8 +4,9 @@ Camera -> Box (OBB) + Track ID -> box barcode -> BE checklist (Expected)
        -> Items (segmentation inside the box) + Track ID -> item barcode -> Scanned; Visual count
        -> Xong: Compare -> NG (back to packing) | OK -> Seal -> Xong -> result to BE
 """
+import statistics
 import time
-from collections import Counter, deque
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -14,14 +15,15 @@ import numpy as np
 from ultralytics import YOLOE
 
 import ui
-from barcode_reader import ean13_ok, ocr_ean13_async, read_barcodes
+from barcode_reader import ocr_ean13_async, read_barcodes
 from be_client import fetch_checklist, send_result
-from inspection import BoxSession
+from inspection import BoxSession, assign, box_code, inside, obb_from_mask
 
 # Box: detect + OBB only. YOLOE gives a mask internally; only its outline is used, to get the rotation.
 # shortcut: zero-shot is less accurate than a trained model, swap in a trained OBB model (train_obb.py) once it scores well.
-model = YOLOE("yoloe-26s-seg.pt")
-model.set_classes(["box"], model.get_text_pe(["box"]))
+BOX_MODEL, BOX_PROMPT = "yoloe-26s-seg.pt", ["box"]
+model = YOLOE(BOX_MODEL)
+model.set_classes(BOX_PROMPT, model.get_text_pe(BOX_PROMPT))
 
 # Items: segment what is inside boxes; prompt-free = ~4.5k built-in classes, no prompts needed.
 inner = YOLOE("yoloe-26s-seg-pf.pt")
@@ -34,11 +36,14 @@ BLACKOUT_LABELS = {"black", "dark", "darkness", "night", "midnight", "shadow"}
 OBJECT_IDS = [i for i, n in inner.names.items() if n not in TEXT_LABELS | BLACKOUT_LABELS]
 MAX_ITEM_FRAC = 0.6  # an item mask covering more of its box than this is the box itself (e.g. "storage box")
 
-# Seal: zero-shot presence of tape / seal on the box, OBB from its mask.
-# shortcut: presence only, no intact/torn classification; train a seal OBB + cls model once there are labeled photos.
+# Seal: zero-shot tape / seal detection on the box. Shipping boxes often already carry tape, so a box counts as
+# sealed only if the seal area grew after OK (baseline taken when OK is pressed).
+# shortcut: area growth, no intact/torn classification; train a seal OBB + cls model once there are labeled photos.
 seal_model = YOLOE("yoloe-26s-seg.pt")
 SEAL_PROMPTS = ["packing tape", "seal sticker"]
 seal_model.set_classes(SEAL_PROMPTS, seal_model.get_text_pe(SEAL_PROMPTS))
+SEAL_MIN_GAIN = 0.02  # seal area / box area must grow by this much over the baseline
+SEAL_WINDOW = 15  # recent frames whose median seal area decides
 
 # Box, on 100 real webcam frames with a box (+ 79 with a hand-held medicine pack, 180 empty scenes), "s" model:
 #   imgsz 480 conf .15 -> 53/100, 55 ms | 640 .12 -> 74/100, 0 false boxes, 90 ms | 480 .05 -> 80/100 but 4 packs as box.
@@ -46,22 +51,18 @@ seal_model.set_classes(SEAL_PROMPTS, seal_model.get_text_pe(SEAL_PROMPTS))
 # Items: 131 ms @640 -> 79 ms @480, run every 3rd frame.
 BOX_IMGSZ, BOX_CONF, ITEM_IMGSZ, ITEM_EVERY = 640, 0.12, 480, 3
 BOX_TRACKER = str(Path(__file__).with_name("box_tracker.yaml"))
-BOX_VOTES = 2  # reads of the same box barcode (within BOX_WINDOW_S) before it is trusted as box_id
-BOX_WINDOW_S = 3.0
-# The zero-shot box detector misses the box in ~half the frames; a box stays "live" this long after its last
-# detection, so items / barcodes / seal on it are not lost on the frames in between.
+# The zero-shot box detector misses the box in ~a quarter of the frames; a box stays "live" this long after its
+# last detection, so items / barcodes / seal on it are not lost on the frames in between.
 HOLD_S = 1.0
 ROTATE_HINT_S = 1.5  # an item unread this long gets the "rotate the code" hint
-SEAL_WINDOW = 15  # recent frames voting on seal presence
 
 
-def obb_from_mask(polygon):
-    """Oriented box (4 corner points, int) = smallest rotated rectangle around a mask outline."""
-    return cv2.boxPoints(cv2.minAreaRect(polygon.astype(np.float32))).astype(np.int32)
-
-
-def inside(polygon, pt):
-    return cv2.pointPolygonTest(np.asarray(polygon, np.float32), pt, False) >= 0
+def open_camera():
+    """Own capture instead of source=0: Ultralytics opens the webcam at 640x480, too coarse to decode barcodes."""
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # driver clamps to the camera's max (1280x720 on this laptop)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    return cap
 
 
 def ids(r):  # tracker IDs; None until a track is confirmed
@@ -100,32 +101,11 @@ def detect_seals(img, obb):
     return [s for s in seals if inside(obb, tuple(map(float, s.mean(0))))]
 
 
-def assign(session, box_votes, items, live, now, text, c):
-    """Where a barcode read on the full frame belongs (one box at a time on the packing table):
-    on an item's mask -> that item's code (valid EAN-13 only); a non-EAN-13 (shipping-label Code128) anywhere,
-    or any code on a live box but not on an item -> box barcode vote. A loose EAN-13 outside boxes is ignored."""
-    item_tid = next((t for t, p in items if inside(p, c)), None)
-    if item_tid is not None:
-        if session is None or not ean13_ok(text):
-            return False
-        if not session.items[item_tid][text]:  # print each code once per item, not every frame
-            print(f"[scan] box {session.box_id or '?'}  item #{item_tid}: {text}")
-        session.read_item(item_tid, text)
-        return True
-    if ean13_ok(text) and not any(inside(o, c) for _, o in live):
-        return False  # e.g. an item held outside the box
-    if not any(code == text for _, code in box_votes):
-        print(f"[scan] box barcode: {text}")
-    box_votes.append((now, text))
-    return True
-
-
-def box_code(box_votes, now, done_ids):
-    """Box barcode with >= BOX_VOTES reads in the last BOX_WINDOW_S; recent-only so a new box can take over."""
-    while box_votes and now - box_votes[0][0] > BOX_WINDOW_S:
-        box_votes.popleft()
-    code, n = (Counter(c for _, c in box_votes if c not in done_ids).most_common(1) or [(None, 0)])[0]
-    return code if n >= BOX_VOTES else None
+def seal_fraction(img, boxes):
+    """(seal OBBs, seal area / box area) over the live boxes."""
+    seals = [s for _, obb in boxes for s in detect_seals(img, obb)]
+    box_area = sum(cv2.contourArea(obb.astype(np.float32)) for _, obb in boxes) or 1.0
+    return seals, sum(cv2.contourArea(s.astype(np.float32)) for s in seals) / box_area
 
 
 def report(r):
@@ -147,18 +127,15 @@ def finish(session, cmp, seal_status, frame):
     report(send_result(result, cv2.imencode(".jpg", frame)[1].tobytes()))
 
 
-if __name__ == "__main__":  # guarded so train_obb.py can import model / obb_from_mask
+if __name__ == "__main__":
     session, done_ids = None, set()  # one box at a time on the packing table
-    box_votes = deque()  # (time, box barcode) reads; see box_code
+    box_votes = deque()  # (time, box barcode) reads; see inspection.box_code
     held = {}  # box track id -> (OBB, time last detected)
     checklist_job = ocr_job = None  # (future, ...) running in the background
-    seal_votes = deque(maxlen=SEAL_WINDOW)
+    seal_base, seal_fracs = 0.0, deque(maxlen=SEAL_WINDOW)
     ri, items, k, message, clicks = None, [], 0, "", []
 
-    # Own capture instead of source=0: Ultralytics opens the webcam at 640x480, too coarse to decode barcodes.
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # driver clamps to the camera's max (1280x720 on this laptop)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap = open_camera()
     cv2.namedWindow(ui.WINDOW)
     cv2.setMouseCallback(ui.WINDOW, lambda ev, x, y, *_: clicks.append((x, y)) if ev == cv2.EVENT_LBUTTONDOWN else None)
     while True:  # press q to stop
@@ -183,25 +160,31 @@ if __name__ == "__main__":  # guarded so train_obb.py can import model / obb_fro
             for item_tid, _ in items:
                 session.see_item(item_tid, now)
 
-        # Barcodes on the full frame (~12 ms), not only inside detected boxes: the detector misses the box in
-        # ~half the frames, which threw away 49 of 59 decoded barcodes. Unreadable ones go to the OCR fallback.
+        # Barcodes on the full frame (~12 ms), not only inside detected boxes: the detector misses some frames,
+        # which threw away 49 of 59 decoded barcodes. Unreadable ones go to the OCR fallback.
         reads, missed = [], []
         for text, c in read_barcodes(img, missed):
             if assign(session, box_votes, items, boxes, now, text, c):
                 reads.append((text, c))
         if ocr_job and ocr_job[0].done():
-            fut, c = ocr_job
+            fut, ocr_session, item_tid = ocr_job
             ocr_job = None
-            if fut.result():
-                assign(session, box_votes, items, boxes, now, fut.result(), c)
-        if ocr_job is None:
+            try:
+                code = fut.result()
+            except Exception as e:  # e.g. OCR model download failed offline: lose this read, not the app
+                print(f"[ocr] failed: {e}")
+                code = ""
+            if code and ocr_session is session:  # by track id, not position: the item may have moved since
+                session.read_item(item_tid, code)
+                print(f"[scan] box {session.box_id or '?'}  item #{item_tid}: {code} (OCR)")
+        if ocr_job is None and session is not None:
             for quad in missed:
                 c = tuple(map(float, quad.mean(0)))
                 item_tid = next((t for t, p in items if inside(p, c)), None)
                 # Items only: box labels are Code128 with letters, which a digits-only OCR can never read right
                 # (on real frames it turned "X55277605433" into the checksum-valid "1552776054330").
-                if session is not None and item_tid is not None and not session.items[item_tid]:
-                    ocr_job = (ocr_ean13_async(img, quad), c)
+                if item_tid is not None and not session.items[item_tid]:
+                    ocr_job = (ocr_ean13_async(img, quad), session, item_tid)
                     break
 
         # Box barcode -> box_id -> checklist from BE (once per box)
@@ -225,9 +208,8 @@ if __name__ == "__main__":  # guarded so train_obb.py can import model / obb_fro
         # Seal (after OK)
         seals = []
         if session is not None and session.state == "sealing" and boxes:
-            for _, obb in boxes:
-                seals += detect_seals(img, obb)
-            seal_votes.append(bool(seals))
+            seals, frac = seal_fraction(img, boxes)
+            seal_fracs.append(frac)
 
         # Draw
         frame = img.copy()
@@ -253,16 +235,18 @@ if __name__ == "__main__":  # guarded so train_obb.py can import model / obb_fro
             if session is None or session.box_id is None:
                 message = "Chưa đọc được mã hộp"
             elif session.state == "packing":
-                cmp = session.last_compare = session.compare()
+                cmp = session.last_compare = session.compare(now)  # only items still in the box count
                 if cmp["result"] == "NG":
                     finish(session, cmp, "n/a", frame)
                     message = "NG → quay lại xếp hàng, rồi bấm Xong"
                 else:
                     session.state = "sealing"
-                    seal_votes.clear()
+                    seal_base = seal_fraction(img, boxes)[1] if boxes else 0.0  # tape already on the box
+                    seal_fracs.clear()
                     message = "OK → dán seal rồi bấm Xong"
             else:
-                seal = "sealed" if seal_votes and sum(seal_votes) * 2 >= len(seal_votes) else "not_sealed"
+                grown = seal_fracs and statistics.median(seal_fracs) - seal_base >= SEAL_MIN_GAIN
+                seal = "sealed" if grown else "not_sealed"
                 finish(session, session.last_compare, seal, frame)  # items are hidden under the lid now
                 done_ids.add(session.box_id)
                 box_votes.clear()

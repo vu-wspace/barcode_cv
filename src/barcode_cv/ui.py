@@ -31,7 +31,7 @@ def render(frame, session, now, message, rotate_after):
         line({"packing": "Đang xếp hàng", "sealing": "OK → dán seal rồi bấm Xong"}[session.state],
              ORANGE if session.state == "sealing" else GREY)
         y += 8
-        got = session.scanned()
+        got = session.scanned(now)  # items still in the box
         if session.box_id and session.loading:
             line("Đang tải checklist…", GREY)
         elif session.box_id and session.expected is None:
@@ -46,9 +46,10 @@ def render(frame, session, now, message, rotate_after):
             if code not in known and session.expected is not None:
                 line(f"× Không có trong đơn: {code} x{n}", RED)
         y += 8
-        line(f"Thấy {len(session.items)} item · quét được {sum(got.values())}", GREY)
-        for t in session.unread(now, rotate_after):
-            line(f"Item #{t} chưa đọc được mã → xoay mã", ORANGE)
+        line(f"Thấy {len(session.present(now))} item · quét được {sum(got.values())}", GREY)
+        unread = session.unread(now, rotate_after)
+        if unread:  # one line, however many: a long list would run over the Xong button
+            line(f"{len(unread)} item chưa đọc được mã → xoay mã", ORANGE)
         c = session.last_compare
         if c and c["result"] == "NG" and session.state == "packing":
             y += 8
