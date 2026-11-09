@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+datasets/
+runs/
+results/
+
+# Model weights: downloaded automatically on first run; GitHub rejects files > 100 MB (mobileclip2_b.ts is 254 MB)
+*.pt
+mobileclip*.ts
+
+# Local config (BE_URL, ...)
+.env
