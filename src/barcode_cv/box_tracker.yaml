@@ -1,10 +1,10 @@
 # ByteTrack for the zero-shot box detector. Defaults start tracks only at conf >= 0.25, but boxes are detected
-# from conf 0.15, so most of them never got a track ID and were ignored (with their barcodes).
-# Thresholds below must stay <= the conf passed to model.track in yolo_model.py.
+# from BOX_CONF (0.12), so most of them never got a track ID and were ignored (with their barcodes).
+# Thresholds below must stay <= BOX_CONF in yolo_model.py.
 tracker_type: bytetrack
-track_high_thresh: 0.15
+track_high_thresh: 0.12
 track_low_thresh: 0.05
-new_track_thresh: 0.15
+new_track_thresh: 0.12
 track_buffer: 30
 match_thresh: 0.8
 fuse_score: True

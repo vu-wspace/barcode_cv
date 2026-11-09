@@ -39,8 +39,11 @@ seal_model = YOLOE("yoloe-26s-seg.pt")
 SEAL_PROMPTS = ["packing tape", "seal sticker"]
 seal_model.set_classes(SEAL_PROMPTS, seal_model.get_text_pe(SEAL_PROMPTS))
 
-# Speed (CPU, per frame): box model 176 ms @800 -> 63 ms @480; items 131 ms @640 -> 79 ms @480, run every 3rd frame.
-BOX_IMGSZ, ITEM_IMGSZ, ITEM_EVERY = 480, 480, 3
+# Box, on 100 real webcam frames with a box (+ 79 with a hand-held medicine pack, 180 empty scenes), "s" model:
+#   imgsz 480 conf .15 -> 53/100, 55 ms | 640 .12 -> 74/100, 0 false boxes, 90 ms | 480 .05 -> 80/100 but 4 packs as box.
+#   Larger models: m 48/100 (125 ms), l 78/100 (151 ms); 5 prompts instead of "box": no gain.
+# Items: 131 ms @640 -> 79 ms @480, run every 3rd frame.
+BOX_IMGSZ, BOX_CONF, ITEM_IMGSZ, ITEM_EVERY = 640, 0.12, 480, 3
 BOX_TRACKER = str(Path(__file__).with_name("box_tracker.yaml"))
 BOX_VOTES = 2  # reads of the same box barcode (within BOX_WINDOW_S) before it is trusted as box_id
 BOX_WINDOW_S = 3.0
@@ -162,7 +165,7 @@ if __name__ == "__main__":  # guarded so train_obb.py can import model / obb_fro
         if not ok:
             break
         now, k = time.time(), k + 1
-        r = model.track(img, persist=True, conf=0.15, imgsz=BOX_IMGSZ, tracker=BOX_TRACKER, verbose=False)[0]
+        r = model.track(img, persist=True, conf=BOX_CONF, imgsz=BOX_IMGSZ, tracker=BOX_TRACKER, verbose=False)[0]
         detected = {tid: obb_from_mask(p) for tid, p in zip(ids(r), r.masks.xy if r.masks is not None else [])
                     if tid is not None and len(p) >= 3}  # minAreaRect needs a real outline
         held.update({tid: (obb, now) for tid, obb in detected.items()})

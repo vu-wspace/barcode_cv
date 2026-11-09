@@ -82,7 +82,7 @@ Hợp đồng API do phía client tự giả định. Sửa ở đầu file `src
 
 ## Train model OBB cho hộp (tuỳ chọn)
 
-Box detector zero-shot hiện chỉ bắt được hộp ở khoảng 30–50% frame. Để cải thiện:
+Box detector zero-shot hiện bắt được hộp ở khoảng 74% frame (đo trên 100 frame webcam thật). Để cải thiện:
 
 ```bash
 uv run python src/barcode_cv/train_obb.py collect   # SPACE: lưu frame khi khung xanh đúng, q: thoát
@@ -100,7 +100,7 @@ Nên thu khoảng 150–300 ảnh, đủ nhiều góc, khoảng cách và ánh s
 | `src/barcode_cv/inspection.py` | `BoxSession`: Expected / Scanned / Visual count, Compare |
 | `src/barcode_cv/be_client.py` | API client, mock, lưu kết quả trên máy |
 | `src/barcode_cv/ui.py` | Panel nhân viên, nút Xong |
-| `src/barcode_cv/box_tracker.yaml` | ByteTrack, ngưỡng khớp với `conf=0.15` của box detector |
+| `src/barcode_cv/box_tracker.yaml` | ByteTrack, ngưỡng khớp với `BOX_CONF` (0.12) của box detector |
 | `src/barcode_cv/train_obb.py` | Thu dữ liệu và train model OBB cho hộp |
 | `mock_checklist.json` | Checklist giả khi chưa có BE |
 
@@ -114,8 +114,8 @@ uv run python barcode_reader.py
 
 ## Giới hạn đã biết
 
-- **Box zero-shot còn yếu:** bắt được hộp ở khoảng 30–50% frame. Barcode vẫn đọc trên cả khung hình và box được giữ thêm 1 s để bù, nhưng muốn ổn định thì cần train model OBB.
+- **Box zero-shot còn yếu:** bắt được hộp ở khoảng 74% frame. Barcode vẫn đọc trên cả khung hình và box được giữ thêm 1 s để bù, nhưng muốn ổn định thì cần train model OBB.
 - **Seal:** chỉ biết có hay không có seal, chưa phân loại được seal còn nguyên hay bị rách. Cần ảnh đã gán nhãn để train model OBB + classification.
 - **Barcode trên webcam 1280×720:** mỗi vạch chỉ khoảng 2 px. Frame bị nhòe do chuyển động sẽ không đọc được, nên cầm yên khoảng nửa giây. OCR dự phòng mất khoảng 1,1 s mỗi lần và chỉ đọc mã 13 số.
 - **Đếm trùng:** nếu tracker đổi ID của cùng một item (do bị che hoặc di chuyển nhanh), item đó bị đếm 2 lần.
-- **Tốc độ:** khoảng 9 FPS trên CPU khi có hộp trong khung hình.
+- **Tốc độ:** khoảng 7–9 FPS trên CPU khi có hộp trong khung hình.
