@@ -6,6 +6,7 @@ Camera -> Box (OBB) + Track ID -> box barcode -> BE checklist (Expected)
 """
 import time
 from collections import Counter, deque
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -142,7 +143,7 @@ def finish(session, cmp, seal_status, frame):
     result = {"box_id": session.box_id, "items": cmp["scanned"], "qty": sum(cmp["scanned"].values()),
               "result": cmp["result"], "missing": cmp["missing"], "extra": cmp["extra"], "wrong": cmp["wrong"],
               "unread": cmp["unread"], "visual_count": cmp["visual_count"], "seal_status": seal_status,
-              "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+              "time": datetime.now().astimezone().isoformat(timespec="seconds")}  # with UTC offset
     report(send_result(result, cv2.imencode(".jpg", frame)[1].tobytes()))
 
 

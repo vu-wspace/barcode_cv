@@ -2,7 +2,7 @@
 
 Hệ thống kiểm tra đóng gói tại bàn, đặt trước bước seal. Camera nhận diện **hộp** và đọc **mã hộp**, rồi lấy checklist đơn hàng từ BE. Hệ thống segment các **item trong hộp**, đọc **barcode từng item** và so sánh với checklist khi nhân viên bấm **Xong**. Nếu OK, hệ thống kiểm tra **seal**, sau đó gửi kết quả về BE.
 
-Phần BE không nằm trong repo này. Repo chỉ có API client (xem [Kết nối BE](#kết-nối-be)).
+Repo gồm 2 phần: **camera client** (`yolo_model.py`) chạy tại bàn đóng gói và **BE** (`server.py`, FastAPI + PostgreSQL) lưu checklist và kết quả. Xem [BE](#be-fastapi--postgresql).
 
 ## Pipeline
 
@@ -62,23 +62,59 @@ Cửa sổ gồm hình camera và panel nhân viên. Panel hiển thị:
 
 Terminal in ra mỗi mã khi đọc được lần đầu (`[scan] ...`) và bảng tổng kết mỗi khi có kết quả.
 
-## Kết nối BE
+## BE (FastAPI + PostgreSQL)
 
-Cấu hình trong `.env`:
+### Chạy BE
 
+1. Tạo database (một lần):
+   ```bash
+   psql -U postgres -c "CREATE DATABASE barcode_cv"
+   ```
+2. Thêm vào `.env`:
+   ```
+   DATABASE_URL=postgresql://postgres:<mật khẩu>@localhost:5432/barcode_cv
+   ```
+   Các bảng (`boxes`, `checklist_items`, `inspections`, xem `src/barcode_cv/schema.sql`) được tạo tự động khi server khởi động.
+3. Chạy server:
+   ```bash
+   uv run uvicorn server:app --app-dir src/barcode_cv --host 0.0.0.0 --port 8000
+   ```
+   Tài liệu API tương tác ở `http://localhost:8000/docs`.
+4. Nạp checklist. Có hai cách:
+   - từ file JSON cùng định dạng với `mock_checklist.json`:
+     ```bash
+     uv run python src/barcode_cv/server.py seed mock_checklist.json
+     ```
+   - hoặc qua API: `PUT /boxes/{box_id}/checklist`.
+
+Tự kiểm tra BE (chạy với `DATABASE_URL`, tự xoá dữ liệu test, in ra `ok`):
+
+```bash
+uv run python src/barcode_cv/server.py check
 ```
-BE_URL=http://<host>:<port>
-```
 
-Hợp đồng API do phía client tự giả định. Sửa ở đầu file `src/barcode_cv/be_client.py` khi BE chốt định dạng.
+### API
 
 | Gọi | Dữ liệu |
 |---|---|
-| `GET {BE_URL}/boxes/{box_id}/checklist` | `[{"item_id": "...", "barcodes": ["893..."], "quantity": 1}]`. Trả 404 nếu hộp không có đơn. |
-| `POST {BE_URL}/inspections` | Kết quả (`box_id, items, qty, result, missing, extra, wrong, unread, visual_count, seal_status, time`) kèm `image_jpeg_b64` |
+| `GET /boxes/{box_id}/checklist` | `[{"item_id": "...", "barcodes": ["893..."], "quantity": 1}]`. Trả 404 nếu hộp không có đơn. |
+| `PUT /boxes/{box_id}/checklist` | Tạo mới hoặc thay toàn bộ checklist của một hộp (cùng định dạng như trên). Trả 422 nếu trùng `item_id` hoặc `quantity < 1`. |
+| `POST /inspections` | Kết quả do camera gửi: `inspection_id, box_id, items, qty, result, missing, extra, wrong, unread, visual_count, seal_status, time` (có múi giờ) kèm `image_jpeg_b64`. Gửi lại cùng `inspection_id` thì không tạo bản ghi trùng (`"duplicate": true`). |
+| `GET /inspections?box_id=&limit=` | Danh sách kết quả, mới nhất trước, không kèm ảnh |
+| `GET /inspections/{id}/image` | Ảnh JPEG lúc bấm Xong |
+
+### Kết nối camera với BE
+
+Thêm vào `.env` trên máy đặt camera:
+
+```
+BE_URL=http://<host BE>:8000
+```
 
 - **Không có `BE_URL`:** checklist lấy từ `mock_checklist.json` (map `box_id → checklist`), và kết quả chỉ lưu trên máy.
-- **Kết quả luôn được lưu trên máy trước** (`results/results.jsonl` cùng ảnh `.jpg`), sau đó mới POST lên BE, thử lại 3 lần. Mất mạng thì không mất kết quả.
+- **Kết quả luôn được lưu trên máy trước** (`results/results.jsonl` cùng ảnh `.jpg`), sau đó mới POST lên BE. Lỗi mạng hoặc lỗi server (5xx) được thử lại 3 lần. BE từ chối dữ liệu (4xx) thì không thử lại. Mất mạng thì không mất kết quả.
+
+BE hiện chưa có xác thực. Chỉ chạy trong mạng nội bộ, hoặc đặt sau reverse proxy có xác thực trước khi mở ra ngoài.
 
 ## Train model OBB cho hộp (tuỳ chọn)
 
@@ -99,6 +135,8 @@ Nên thu khoảng 150–300 ảnh, đủ nhiều góc, khoảng cách và ánh s
 | `src/barcode_cv/barcode_reader.py` | Đọc barcode (OpenCV → zxing → OCR), kiểm tra EAN-13 |
 | `src/barcode_cv/inspection.py` | `BoxSession`: Expected / Scanned / Visual count, Compare |
 | `src/barcode_cv/be_client.py` | API client, mock, lưu kết quả trên máy |
+| `src/barcode_cv/server.py` | BE: FastAPI + PostgreSQL, lệnh `seed` / `check` |
+| `src/barcode_cv/schema.sql` | Schema PostgreSQL |
 | `src/barcode_cv/ui.py` | Panel nhân viên, nút Xong |
 | `src/barcode_cv/box_tracker.yaml` | ByteTrack, ngưỡng khớp với `BOX_CONF` (0.12) của box detector |
 | `src/barcode_cv/train_obb.py` | Thu dữ liệu và train model OBB cho hộp |

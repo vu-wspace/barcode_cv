@@ -1,8 +1,7 @@
-"""API client to the BE. The BE itself is out of scope.
+"""API client to the BE (server.py).
 
-Assumed contract (change here when the BE team fixes it):
     GET  {BE_URL}/boxes/{box_id}/checklist -> [{"item_id", "barcodes": [...], "quantity"}], 404 = unknown box
-    POST {BE_URL}/inspections               <- result JSON (+ "image_jpeg_b64")
+    POST {BE_URL}/inspections               <- result JSON with "inspection_id" (+ "image_jpeg_b64")
 Without BE_URL in .env, the checklist comes from mock_checklist.json and results are only stored locally.
 """
 import base64
@@ -12,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -47,7 +47,8 @@ def send_result(result, jpeg):
     OUTBOX.mkdir(exist_ok=True)
     stem = f"{time.strftime('%Y%m%d-%H%M%S')}_{result['box_id']}"
     (OUTBOX / f"{stem}.jpg").write_bytes(jpeg)
-    record = {**result, "image": str(OUTBOX / f"{stem}.jpg")}
+    # inspection_id: the BE stores a retried POST only once
+    record = {**result, "inspection_id": str(uuid.uuid4()), "image": str(OUTBOX / f"{stem}.jpg")}
     with open(OUTBOX / "results.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     if BE_URL:
@@ -63,6 +64,12 @@ def _post(body, tries=3):
                                          headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=10).close()
             return
+        except urllib.error.HTTPError as e:
+            if e.code < 500:  # rejected (bad data): retrying cannot help
+                print(f"[be] POST rejected {e.code}: {e.read().decode(errors='replace')[:300]}")
+                break
+            print(f"[be] POST failed ({i + 1}/{tries}): {e}")
+            time.sleep(2 ** i)
         except (urllib.error.URLError, TimeoutError) as e:
             print(f"[be] POST failed ({i + 1}/{tries}): {e}")
             time.sleep(2 ** i)
