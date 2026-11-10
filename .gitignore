@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+graphify-out/
 
 # Virtual environments
 .venv
