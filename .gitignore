@@ -21,3 +21,4 @@ mobileclip*.ts
 .env
 .env.*
 !.env.example
+dataset/
