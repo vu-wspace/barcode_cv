@@ -45,7 +45,9 @@ services:
     build: services/vision
     profiles: [vision]
     environment:
-      CAMERA_SOURCE: ${CAMERA_SOURCE_DOCKER:-0}  # stream URL (rtsp://..., http://...), or 0 with the device below
+      # browser: the web UI sends its camera (works on Docker Desktop for Windows/macOS)
+      # or a stream URL (rtsp://..., http://...), or 0 with the device below (Linux)
+      CAMERA_SOURCE: ${CAMERA_SOURCE_DOCKER:-browser}
       BE_URL: http://backend:8000
     volumes:
       - vision-data:/data  # model weights (downloaded once) + local copy of results

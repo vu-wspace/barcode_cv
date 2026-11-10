@@ -1,0 +1,21 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - img "Camera bàn đóng gói" [ref=e4]
+    - generic [ref=e5]: Không có hình từ vision service
+  - complementary [ref=e6]:
+    - generic [ref=e7]:
+      - button "Bật camera" [active] [ref=e9] [cursor=pointer]
+      - status [ref=e10]: Đang xin quyền camera… (bấm "Cho phép" trên hộp thoại của trình duyệt)
+    - 'heading "HỘP: X55277605433" [level=1] [ref=e11]'
+    - paragraph [ref=e12]: Đang xếp hàng
+    - paragraph
+    - list [ref=e13]:
+      - listitem [ref=e24]:
+        - generic [ref=e25]: • SALONPAS
+        - generic [ref=e26]: 0/1
+    - list
+    - paragraph [ref=e17]: Thấy 0 item · quét được 0
+    - paragraph
+    - paragraph [ref=e18]: "Chưa nhận hình từ trình duyệt: bấm \"Bật camera\" và cho phép quyền camera"
+    - button "XONG Enter" [ref=e19] [cursor=pointer]
+    - paragraph [ref=e20]: 0 FPS

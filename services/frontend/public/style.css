@@ -30,6 +30,13 @@ li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
 #xong:active { filter: brightness(0.85); }
 #xong:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
 kbd { font-size: 14px; opacity: 0.8; }
+.camera { padding-bottom: 10px; margin-bottom: 6px; border-bottom: 1px solid #3a3a42; }
+.camera-row { display: flex; gap: 8px; }
+#cam-btn { padding: 8px 14px; font-size: 16px; color: #fff; background: #3a3a42; border: 0; border-radius: 8px; cursor: pointer; }
+#cam-btn:focus-visible, #cam-select:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+#cam-select { flex: 1; min-width: 0; padding: 6px; font-size: 15px; color: var(--text); background: var(--bg);
+  border: 1px solid #3a3a42; border-radius: 8px; }
+#cam-status { margin-top: 6px; font-size: 15px; }
 @media (max-width: 800px) {
   main { grid-template-columns: 1fr; height: auto; }
   .video { min-height: 40vh; }

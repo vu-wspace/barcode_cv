@@ -83,12 +83,151 @@ function connectStream() {
   img.src = `${VISION}/stream.mjpg?t=${Date.now()}`;
 }
 
+// --- Browser camera (vision runs with CAMERA_SOURCE=browser) -----------------------------------------------
+// The page asks for camera permission (getUserMedia) and sends ~10 JPEG frames/s to the vision service over a
+// WebSocket. getUserMedia only works on a secure page: http://localhost or HTTPS.
+const SEND_EVERY_MS = 100;
+const JPEG_QUALITY = 0.92; // measured: no loss in barcode reads vs the original frames
+const cam = { stream: null, ws: null, timer: null, sending: false };
+
+function camStatus(text, cls = "muted") {
+  $("cam-status").textContent = text;
+  $("cam-status").className = cls;
+}
+
+const PERMISSION_HELP = {
+  NotAllowedError: "Quyền camera đang bị chặn. Bấm biểu tượng camera / ổ khoá trên thanh địa chỉ → Cho phép, rồi bấm \"Bật camera\".",
+  SecurityError: "Quyền camera đang bị chặn bởi trình duyệt hoặc chính sách của máy.",
+  NotFoundError: "Không tìm thấy camera nào. Cắm camera rồi bấm \"Bật camera\".",
+  NotReadableError: "Camera đang được ứng dụng khác dùng (Zoom, Teams, vision chạy trực tiếp…). Tắt ứng dụng đó rồi thử lại.",
+  OverconstrainedError: "Camera đã chọn không còn. Chọn camera khác.",
+};
+
+function stopCamera() {
+  clearInterval(cam.timer);
+  cam.timer = null;
+  if (cam.ws) { cam.ws.onclose = null; cam.ws.close(); cam.ws = null; }
+  if (cam.stream) { cam.stream.getTracks().forEach((t) => t.stop()); cam.stream = null; }
+}
+
+async function listCameras(currentId) {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+  const select = $("cam-select");
+  select.replaceChildren(...devices.map((d, i) => {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `Camera ${i + 1}`; // labels are only visible after permission is granted
+    o.selected = d.deviceId === currentId;
+    return o;
+  }));
+  select.hidden = devices.length < 2;
+}
+
+function openSocket() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${VISION}/camera`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => camStatus("Camera đang gửi hình cho vision.", "ok");
+  ws.onclose = (e) => {
+    cam.ws = null;
+    if (e.code === 4000) { // another tab now sends the camera
+      stopCamera();
+      $("cam-btn").textContent = "Bật camera";
+      camStatus("Một tab khác đang dùng camera. Bấm \"Bật camera\" để dùng tab này.", "warn");
+      return;
+    }
+    if (cam.stream) {
+      camStatus("Mất kết nối tới vision, đang kết nối lại…", "warn");
+      setTimeout(() => { if (cam.stream && !cam.ws) cam.ws = openSocket(); }, 2000);
+    }
+  };
+  return ws;
+}
+
+function sendFrame(video, canvas) {
+  const ws = cam.ws;
+  // skip while the previous frame is still on its way: vision always uses the newest frame anyway
+  if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 0 || cam.sending || !video.videoWidth) return;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  cam.sending = true;
+  canvas.toBlob((blob) => {
+    cam.sending = false;
+    if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
+  }, "image/jpeg", JPEG_QUALITY);
+}
+
+async function startCamera(deviceId) {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    camStatus("Trình duyệt chỉ cho dùng camera trên trang an toàn: mở qua http://localhost:8080 hoặc HTTPS.", "bad");
+    return;
+  }
+  stopCamera();
+  camStatus("Đang xin quyền camera… (bấm \"Cho phép\" trên hộp thoại của trình duyệt)");
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      // ask for the highest resolution: barcode bars are ~2 px wide at 720p already
+      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    });
+  } catch (e) {
+    camStatus(PERMISSION_HELP[e.name] || `Không mở được camera: ${e.name} ${e.message}`, "bad");
+    $("cam-btn").textContent = "Thử lại";
+    return;
+  }
+  const track = cam.stream.getVideoTracks()[0];
+  const id = track.getSettings().deviceId;
+  try { localStorage.setItem("cameraId", id); } catch { /* private window: just not remembered */ }
+  track.onended = () => { // unplugged, or permission revoked while running
+    stopCamera();
+    $("cam-btn").textContent = "Bật camera";
+    camStatus("Camera đã dừng (bị rút ra hoặc bị thu hồi quyền).", "bad");
+  };
+  await listCameras(id);
+
+  const video = $("local");
+  video.srcObject = cam.stream;
+  await video.play();
+  const canvas = document.createElement("canvas");
+  cam.ws = openSocket();
+  cam.timer = setInterval(() => sendFrame(video, canvas), SEND_EVERY_MS);
+  const s = track.getSettings();
+  $("cam-btn").textContent = "Tắt camera";
+  camStatus(`Camera ${s.width}×${s.height}, đang kết nối tới vision…`);
+}
+
+async function setupBrowserCamera() {
+  try {
+    const r = await fetch(`${VISION}/config`, { cache: "no-store" });
+    if (!r.ok || !(await r.json()).browser_camera) return; // vision reads its own camera
+  } catch {
+    setTimeout(setupBrowserCamera, 3000); // vision not up yet
+    return;
+  }
+  $("camera-ctl").hidden = false;
+  $("cam-btn").addEventListener("click", () => {
+    if (cam.stream) { stopCamera(); $("cam-btn").textContent = "Bật camera"; camStatus("Camera đã tắt."); }
+    else startCamera($("cam-select").value || undefined);
+  });
+  $("cam-select").addEventListener("change", () => startCamera($("cam-select").value));
+  let saved = null;
+  try { saved = localStorage.getItem("cameraId"); } catch { /* storage blocked */ }
+  // start right away when permission was granted before; otherwise wait for the button (the browser's prompt
+  // should follow a click, and a denied prompt cannot be shown again without one)
+  const perm = await navigator.permissions?.query({ name: "camera" }).catch(() => null);
+  if (perm?.state === "granted") startCamera(saved || undefined);
+  else camStatus("Bấm \"Bật camera\" và cho phép trình duyệt dùng camera.");
+  if (perm) perm.onchange = () => { if (perm.state === "granted" && !cam.stream) startCamera(saved || undefined); };
+}
+
 $("xong").addEventListener("click", xong);
 document.addEventListener("keydown", (e) => {
-  if ((e.key === "Enter" || e.key === " ") && !e.repeat && document.activeElement !== $("xong")) {
+  const inControl = ["xong", "cam-btn", "cam-select"].includes(document.activeElement?.id);
+  if ((e.key === "Enter" || e.key === " ") && !e.repeat && !inControl) {
     e.preventDefault();
     xong();
   }
 });
 connectStream();
 poll();
+setupBrowserCamera();

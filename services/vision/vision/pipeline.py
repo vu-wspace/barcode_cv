@@ -59,17 +59,20 @@ BOX_TRACKER = str(Path(__file__).with_name("box_tracker.yaml"))
 # last detection, so items / barcodes / seal on it are not lost on the frames in between.
 HOLD_S = 1.0
 ROTATE_HINT_S = 1.5  # an item unread this long gets the "rotate the code" hint
-CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "0")  # webcam index (0) or a stream URL (rtsp://..., http://...)
+# webcam index (0), a stream URL (rtsp://..., http://...), or "browser": frames from the web UI's camera
+CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "0")
 
 
 class Shared:
-    """Hand-over between the camera loop (writer) and the HTTP API (readers)."""
+    """Hand-over between the camera loop and the HTTP API."""
 
     def __init__(self):
         self.jpeg = None  # latest annotated frame
         self.state = {}  # latest operator state, see snapshot()
         self.frame_ready = threading.Condition()
         self.xong = queue.Queue()  # "Xong" presses from the web UI
+        self.browser_jpeg = None  # latest camera frame sent by the web UI (CAMERA_SOURCE=browser)
+        self.browser_ready = threading.Condition()
 
     def publish(self, frame, state):
         jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
@@ -77,9 +80,40 @@ class Shared:
             self.jpeg, self.state = jpeg, state
             self.frame_ready.notify_all()
 
+    def put_browser_frame(self, jpeg):
+        with self.browser_ready:
+            self.browser_jpeg = jpeg  # overwrite: the loop always takes the newest frame, older ones are dropped
+            self.browser_ready.notify_all()
 
-def open_camera(source=CAMERA_SOURCE):
-    """Webcam by index at its max resolution (Ultralytics' default 640x480 is too coarse for barcodes), or a URL."""
+    def take_browser_frame(self, timeout):
+        with self.browser_ready:
+            self.browser_ready.wait_for(lambda: self.browser_jpeg is not None, timeout=timeout)
+            jpeg, self.browser_jpeg = self.browser_jpeg, None
+            return jpeg
+
+
+class BrowserCamera:
+    """Camera frames from the web UI (getUserMedia, sent as JPEG over a WebSocket). Lets the service run where it
+    cannot open the webcam itself, e.g. Docker Desktop on Windows. JPEG q92 from the browser: barcodes read in
+    107/315 recorded webcam frames vs 104/315 for the originals, i.e. no loss."""
+
+    def __init__(self, shared):
+        self.shared = shared
+
+    def read(self):
+        jpeg = self.shared.take_browser_frame(timeout=2.0)
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR) if jpeg else None
+        return img is not None, img
+
+    def release(self):
+        pass
+
+
+def open_camera(source, shared):
+    """Webcam by index at its max resolution (Ultralytics' default 640x480 is too coarse for barcodes), a URL,
+    or the web UI's camera."""
+    if source == "browser":
+        return BrowserCamera(shared)
     cap = cv2.VideoCapture(int(source) if source.isdigit() else source)
     if source.isdigit():
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # driver clamps to the camera's max (1280x720 on the test laptop)
@@ -176,16 +210,20 @@ def run(shared, source=CAMERA_SOURCE):
     seal_base, seal_fracs = 0.0, deque(maxlen=SEAL_WINDOW)
     ri, items, k, message, fps, last = None, [], 0, "", 0.0, time.time()
 
-    cap = open_camera(source)
+    cap = open_camera(source, shared)
     while True:
         ok, img = cap.read()
-        if not ok:  # unplugged webcam or dropped stream: keep the service up and retry
-            message = f"Mất tín hiệu camera ({source}), đang kết nối lại…"
+        if not ok:  # unplugged webcam, dropped stream or no browser sending: keep the service up and retry
+            message = ("Chưa nhận hình từ trình duyệt: bấm \"Bật camera\" và cho phép quyền camera"
+                       if source == "browser" else f"Mất tín hiệu camera ({source}), đang kết nối lại…")
             shared.publish(np.zeros((360, 640, 3), np.uint8), snapshot(session, time.time(), message, 0.0))
             cap.release()
-            time.sleep(2)
-            cap = open_camera(source)
+            if source != "browser":  # BrowserCamera.read already waited
+                time.sleep(2)
+            cap = open_camera(source, shared)
             continue
+        if message.startswith(("Chưa nhận hình", "Mất tín hiệu")):
+            message = ""  # camera is back
         now, k = time.time(), k + 1
         fps, last = 0.9 * fps + 0.1 / max(now - last, 1e-3), now
         r = model.track(img, persist=True, conf=BOX_CONF, imgsz=BOX_IMGSZ, tracker=BOX_TRACKER, verbose=False)[0]
@@ -216,7 +254,7 @@ def run(shared, source=CAMERA_SOURCE):
             ocr_job = None
             try:
                 code = fut.result()
-            except Exception as e:  # e.g. Tesseract missing: lose this read, not the app
+            except Exception as e:  # e.g. an OCR model error: lose this read, not the app
                 print(f"[ocr] failed: {e}")
                 code = ""
             # OCR is the least reliable reader: accept only a code of this order. Anything else leaves the item

@@ -7,12 +7,14 @@ dependencies = [
     "clip",
     "fastapi>=0.162.2",
     "lap>=0.5.12",
-    "pytesseract>=0.3.13",
+    "onnxruntime>=1.31.1",
     "python-dotenv>=1.2.4",
+    "rapidocr>=3.10.0",
     "torch",
     "torchvision",
     "ultralytics>=8.4.208",
     "uvicorn>=0.30",
+    "websockets>=13",
     "zxing-cpp>=3.1.1",
 ]
 
@@ -21,6 +23,9 @@ dev = ["python-barcode>=0.16.1"]  # barcode_reader.py self-check only
 
 [tool.uv]
 package = false  # an app run with `python -m vision`, not a library to build
+# rapidocr pulls opencv-python-headless, which overwrites cv2 from opencv-python (ultralytics) and removes the GUI
+# that train_obb.py collect needs (cv2.namedWindow: "The function is not implemented"). Same cv2 module, never install it.
+override-dependencies = ["opencv-python-headless; sys_platform == 'never'"]
 
 # CPU-only PyTorch: the default PyPI wheels on Linux pull several GB of CUDA libraries into the Docker image.
 [[tool.uv.index]]

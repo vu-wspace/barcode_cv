@@ -25,15 +25,17 @@ Hệ thống kiểm tra đóng gói tại bàn, đặt trước bước seal. Ca
 1. Tạo `.env` từ `.env.example` và đặt `POSTGRES_PASSWORD`.
 2. Chọn cách chạy vision:
 
-   **a) Vision trong Docker** (Linux, hoặc camera IP):
+   **a) Vision trong Docker, camera của trình duyệt** (mặc định, chạy được cả trên Windows/macOS):
    ```bash
-   # .env: VISION_URL=http://vision:8090, CAMERA_SOURCE_DOCKER=rtsp://... (hoặc 0 + bỏ comment devices trong docker-compose.yml)
+   # .env: VISION_URL=http://vision:8090, CAMERA_SOURCE_DOCKER=browser
    docker compose --profile vision up -d --build
    ```
+   Trang web có nút **"Bật camera"**. Trình duyệt hỏi quyền dùng camera, bạn chọn **Cho phép**. Từ đó trang gửi khoảng 10 frame/s (JPEG chất lượng 92) cho vision qua WebSocket. Nếu có nhiều camera, chọn trong danh sách. Lựa chọn này được nhớ lại cho lần sau.
+   Ngoài ra, `CAMERA_SOURCE_DOCKER` có thể là URL camera IP (`rtsp://…`), hoặc `0` trên Linux kèm bỏ comment `devices` trong `docker-compose.yml`.
 
-   **b) Vision chạy trực tiếp trên máy** (Windows/macOS với webcam laptop). Docker Desktop không chuyển được webcam vào container.
+   **b) Vision chạy trực tiếp trên máy, tự đọc webcam** (không cần trình duyệt gửi hình):
    ```bash
-   # .env: VISION_URL=http://host.docker.internal:8090, CAMERA_SOURCE=0, BE_URL=http://localhost:8080/api
+   # .env: VISION_URL=http://host.docker.internal:8090, CAMERA_SOURCE=0 (hoặc browser), BE_URL=http://localhost:8080/api
    docker compose up -d --build
    cd services/vision && uv sync && uv run python -m vision
    ```
@@ -64,7 +66,7 @@ Xong ─► Compare: Expected vs Scanned · Scanned vs Visual count
 |---|---|
 | Box | YOLOE-26 zero-shot với prompt `"box"`. OBB là hình chữ nhật xoay nhỏ nhất bao quanh mask. Tracking dùng ByteTrack (`box_tracker.yaml`). Box được giữ thêm 1 s khi detector bỏ lỡ một frame. |
 | Items | YOLOE-26 prompt-free (khoảng 4.5k lớp), chạy trên cả khung hình với phần ngoài hộp tô đen. Bỏ các lớp chữ/nhãn và mask lớn bằng cả hộp. Chạy mỗi 3 frame. Khi Compare, chỉ tính item còn thấy trong hộp trong 3 s gần nhất. |
-| Barcode | OpenCV tìm và đọc barcode trên cả khung hình. Nếu chưa đọc được: cắt theo góc xoay, phóng to x2, làm nét rồi đưa cho zxing. Còn thất bại thì **Tesseract** OCR dãy số in dưới vạch (chỉ cho item, chạy nền). Chỉ nhận **EAN-13 đúng checksum** (item) và **Code128** (nhãn vận đơn của hộp). Mã được chọn theo số lần đọc nhiều nhất qua các frame của mỗi track. Mã do OCR đọc chỉ được chấp nhận khi có trong checklist. |
+| Barcode | OpenCV tìm và đọc barcode trên cả khung hình. Nếu chưa đọc được: cắt theo góc xoay, phóng to x2, làm nét rồi đưa cho zxing. Còn thất bại thì OCR dãy số in dưới vạch bằng **RapidOCR** (model PP-OCR, chỉ cho item, chạy nền, giới hạn 2 luồng CPU). Chỉ nhận **EAN-13 đúng checksum** (item) và **Code128** (nhãn vận đơn của hộp). Mã được chọn theo số lần đọc nhiều nhất qua các frame của mỗi track. Mã do OCR đọc chỉ được chấp nhận khi có trong checklist. |
 | box_id | Mã hộp phải đọc được ít nhất 2 lần trong 3 s gần nhất. Mỗi lúc chỉ có một hộp trên bàn. Khi đã có box_id, chỉ mã nằm trên hộp đang thấy mới đổi được hộp. |
 | Seal | YOLOE zero-shot (`"packing tape"`, `"seal sticker"`). Lấy mốc diện tích seal lúc compare ra OK, vì thùng thường có sẵn băng keo. Chỉ tính `sealed` khi diện tích seal tăng thêm ≥ 2% diện tích hộp. |
 
@@ -72,12 +74,11 @@ Xong ─► Compare: Expected vs Scanned · Scanned vs Visual count
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `CAMERA_SOURCE` | `0` | Số thứ tự webcam, hoặc URL luồng camera (`rtsp://…`, `http://…`). Mất tín hiệu thì tự kết nối lại. |
+| `CAMERA_SOURCE` | `0` | Số thứ tự webcam, URL luồng camera (`rtsp://…`, `http://…`), hoặc `browser` (nhận hình từ camera của trang web qua `WS /camera`; mỗi lúc chỉ một tab gửi, tab mở sau sẽ thay tab trước). Mất tín hiệu thì tự kết nối lại. |
 | `BE_URL` | (trống) | URL backend. Để trống thì checklist lấy từ `MOCK_CHECKLIST` và kết quả chỉ lưu trên máy. |
 | `VISION_PORT` | `8090` | Cổng HTTP của vision. |
 | `RESULTS_DIR` | `results` | Nơi lưu bản sao mọi kết quả (`results.jsonl` + ảnh) trước khi gửi backend. |
 | `MOCK_CHECKLIST` | `mock_checklist.json` | Checklist giả khi chưa có backend. |
-| `TESSERACT_CMD` | tự tìm | Đường dẫn `tesseract.exe` khi chạy trực tiếp trên Windows. Cài bằng `winget install -e --id UB-Mannheim.TesseractOCR`. |
 
 Kết quả luôn được lưu trên máy trước, sau đó mới POST lên backend. Lỗi mạng hoặc 5xx được thử lại 3 lần, còn 4xx thì không. Mỗi kết quả có `inspection_id`, nên gửi lại không tạo bản ghi trùng.
 
@@ -134,7 +135,7 @@ services/
   backend/   Dockerfile, pyproject.toml, uv.lock, app/ (server.py, schema.sql)
   vision/    Dockerfile, pyproject.toml, uv.lock, mock_checklist.json,
              vision/ (__main__.py: HTTP API · pipeline.py: vòng lặp camera · inspection.py: so sánh, gán mã ·
-                      barcode_reader.py: OpenCV → zxing → Tesseract · be_client.py · box_tracker.yaml · train_obb.py)
+                      barcode_reader.py: OpenCV → zxing → RapidOCR · be_client.py · box_tracker.yaml · train_obb.py)
 ```
 
 ## Giới hạn đã biết
@@ -143,5 +144,6 @@ services/
 - **Seal:** dựa vào diện tích seal tăng thêm, chưa phân loại seal còn nguyên hay rách, và chưa được kiểm chứng với seal thật.
 - **Barcode trên webcam 1280×720:** mỗi vạch chỉ khoảng 2 px. Frame bị nhòe do chuyển động sẽ không đọc được, nên cầm yên khoảng nửa giây.
 - **Đếm trùng:** nếu tracker đổi ID của cùng một item, item đó bị đếm 2 lần.
-- **Webcam trong Docker:** chỉ dùng được trên Linux. Trên Windows/macOS, chạy vision trực tiếp hoặc dùng camera IP.
+- **Camera trình duyệt cần trang an toàn:** trình duyệt chỉ cho dùng camera trên `http://localhost` hoặc HTTPS. Mở trang từ máy khác qua `http://<IP>:8080` thì nút camera báo lỗi. Muốn vậy cần đặt HTTPS (chứng chỉ) trước nginx.
+- **Webcam gắn trực tiếp vào container:** chỉ được trên Linux. Trên Windows/macOS, dùng camera trình duyệt, camera IP, hoặc chạy vision trực tiếp.
 - **Tốc độ:** khoảng 7–9 FPS trên CPU khi có hộp trong khung hình.

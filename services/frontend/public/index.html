@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiểm tra đóng gói</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:,">
 </head>
 <body>
   <main>
@@ -13,6 +14,13 @@
       <div id="video-error" class="overlay" hidden>Không có hình từ vision service</div>
     </section>
     <aside class="panel">
+      <div id="camera-ctl" class="camera" hidden>
+        <div class="camera-row">
+          <button id="cam-btn" type="button">Bật camera</button>
+          <select id="cam-select" aria-label="Chọn camera" hidden></select>
+        </div>
+        <p id="cam-status" class="muted" role="status"></p>
+      </div>
       <h1 id="box">Đưa hộp vào bàn</h1>
       <p id="stage" class="muted"></p>
       <p id="checklist-status"></p>
@@ -29,6 +37,7 @@
       <p id="status" class="muted"></p>
     </aside>
   </main>
+  <video id="local" playsinline muted hidden></video>
   <script src="app.js"></script>
 </body>
 </html>

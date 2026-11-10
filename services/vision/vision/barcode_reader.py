@@ -2,11 +2,9 @@
 
 On 135 real 1280x720 webcam frames (EAN-13 ~2 px per bar, slightly blurred), zxing on the whole frame read 1;
 OpenCV's detector alone 23; OpenCV locate -> rotate upright, upscale x2, sharpen -> zxing read 45 (of 76 frames
-where a barcode was found at all; the rest were motion-blurred). The fallback, Tesseract OCR of the digits printed
-under the bars, runs in a background thread (see ocr_ean13).
+where a barcode was found at all; the rest were motion-blurred). The fallback, OCR of the digits printed under the
+bars, runs in a background thread (see ocr_ean13).
 """
-import os
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -17,14 +15,6 @@ _detector = cv2.barcode.BarcodeDetector()
 # Only what the pipeline uses: EAN-13 on items, Code128 on shipping labels (box_id). On real frames every EAN-8 /
 # UPC-A that OpenCV returned (18 of 56 reads) was a misread of printed text or patterns.
 _FORMATS = (zxingcpp.BarcodeFormat.EAN13, zxingcpp.BarcodeFormat.Code128)
-
-# Tesseract is a separate program: winget install -e --id UB-Mannheim.TesseractOCR (or set TESSERACT_CMD in .env)
-TESSERACT_CMD = (os.getenv("TESSERACT_CMD") or shutil.which("tesseract")
-                 or r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-# Tesseract's OpenMP threads would fight the YOLO models for every core and freeze the camera window (measured with
-# the previous OCR: 0.1-0.2 s -> 7.5 s per frame); one thread is enough for a small crop.
-os.environ.setdefault("OMP_THREAD_LIMIT", "1")
-OCR_SCALE = 3  # digits are ~10 px tall on the webcam; Tesseract wants ~30 px
 
 
 def ean13_ok(s):
@@ -97,32 +87,28 @@ def ean13_from_text_boxes(boxes, texts):
     return ""
 
 
-def ocr_crop(img, quad):
-    """The bars plus the digits printed under them, grey and upscaled for OCR."""
+_ocr = None
+
+
+def ocr_ean13(img, quad):
+    """Fallback: OCR of the digits printed under the bars; a checksum-valid EAN-13, else "".
+
+    RapidOCR (PP-OCR models on onnxruntime). On 109 found-but-unreadable webcam barcodes it read 7, 0 wrong,
+    ~0.9 s each; Tesseract 5.4 read 0-1 at any setting (digits are ~10 px tall and slightly blurred).
+    """
+    global _ocr
+    if _ocr is None:
+        from rapidocr import RapidOCR  # heavy import, only when the fallback is first needed
+
+        # 2 threads: by default onnxruntime takes every core and fights the YOLO models for them; measured while OCR
+        # ran, the box model went from ~0.1-0.2 s to 7.5 s per frame (window frozen). With 2: no slowdown, OCR 0.9 s.
+        _ocr = RapidOCR(params={"EngineConfig.onnxruntime.intra_op_num_threads": 2})
     x, y, w, h = cv2.boundingRect(quad.astype(np.int32))
-    crop = img[max(y - h // 2, 0):y + h + h // 2, max(x - w // 4, 0):x + w + w // 4]
-    if not crop.size:
-        return crop
-    return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), None, fx=OCR_SCALE, fy=OCR_SCALE,
-                      interpolation=cv2.INTER_CUBIC)
-
-
-def ocr_ean13(img, quad, psm=11):
-    """Fallback: Tesseract OCR of the digits printed under the bars; a checksum-valid EAN-13, else ""."""
-    import pytesseract
-
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-    crop = ocr_crop(img, quad)
+    crop = img[max(y - h // 2, 0):y + h + h // 2, max(x - w // 4, 0):x + w + w // 4]  # bars + digits below
     if not crop.size:
         return ""
-    # No digit whitelist: letters must stay letters, so a label line like "VN5D6W5C4U2R" breaks a digit run
-    # instead of being forced into digits.
-    d = pytesseract.image_to_data(crop, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
-    words = [(i, t.strip()) for i, t in enumerate(d["text"]) if t.strip()]
-    boxes = [[[d["left"][i], d["top"][i]], [d["left"][i] + d["width"][i], d["top"][i]],
-              [d["left"][i] + d["width"][i], d["top"][i] + d["height"][i]],
-              [d["left"][i], d["top"][i] + d["height"][i]]] for i, _ in words]
-    return ean13_from_text_boxes(boxes, [t for _, t in words])
+    res = _ocr(crop)
+    return ean13_from_text_boxes(res.boxes if res.boxes is not None else [], list(res.txts or []))
 
 
 _ocr_pool = ThreadPoolExecutor(max_workers=1)  # one OCR at a time; the camera loop never waits for it
@@ -174,16 +160,13 @@ if __name__ == "__main__":  # self-check: a small, rotated, blurred EAN-13 like 
     frame[200:200 + label.shape[0], 300:300 + label.shape[1]] = label
     found = read_barcodes(frame)
     assert [t for t, _ in found] == ["X55277605433"], found
-    # Tesseract: the digits under a clean, upright barcode (only if Tesseract is installed)
-    if os.path.exists(TESSERACT_CMD):
-        frame = np.full((720, 1280, 3), 255, np.uint8)
-        buf = io.BytesIO()
-        barcode.get("ean13", "893510621132", writer=ImageWriter()).write(buf)
-        code = cv2.imdecode(np.frombuffer(buf.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-        code = cv2.resize(code, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-        frame[200:200 + code.shape[0], 300:300 + code.shape[1]] = code
-        _, _, _, quads = _detector.detectAndDecodeWithType(frame)
-        assert quads is not None and ocr_ean13(frame, quads[0]) == "8935106211321", "tesseract OCR"
-    else:
-        print(f"skipped Tesseract check: {TESSERACT_CMD} not found")
+    # OCR: the digits printed under a clean, upright barcode
+    frame = np.full((720, 1280, 3), 255, np.uint8)
+    buf = io.BytesIO()
+    barcode.get("ean13", "893510621132", writer=ImageWriter()).write(buf)
+    code = cv2.imdecode(np.frombuffer(buf.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+    code = cv2.resize(code, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    frame[200:200 + code.shape[0], 300:300 + code.shape[1]] = code
+    _, _, _, quads = _detector.detectAndDecodeWithType(frame)
+    assert quads is not None and ocr_ean13(frame, quads[0]) == "8935106211321", "OCR"
     print("ok")

@@ -3,6 +3,8 @@
     GET  /state       operator state (JSON), polled by the UI
     GET  /stream.mjpg annotated camera video (MJPEG)
     POST /xong        the operator's "Xong" button
+    GET  /config      {"browser_camera": bool}: should the UI send its own camera?
+    WS   /camera      camera frames (binary JPEG) from the UI, when CAMERA_SOURCE=browser
     GET  /health
 
     python -m vision            (env: CAMERA_SOURCE, BE_URL, VISION_PORT; see README)
@@ -12,13 +14,15 @@ import threading
 import traceback
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from vision import pipeline
 
 shared = pipeline.Shared()
 app = FastAPI(title="Vision service")
+MAX_FRAME_BYTES = 5 * 1024 * 1024  # a 1080p JPEG is ~0.3 MB
+_sender = None  # the one WebSocket allowed to send frames (latest UI tab wins)
 
 
 @app.get("/health")
@@ -35,6 +39,40 @@ def state():
 def xong():
     shared.xong.put(True)  # handled by the camera loop on its next frame
     return {"queued": True}
+
+
+@app.get("/config")
+def config():
+    return {"browser_camera": pipeline.CAMERA_SOURCE == "browser"}
+
+
+@app.websocket("/camera")
+async def camera(ws: WebSocket):
+    """Frames from the UI's camera. One sender at a time: frames from two tabs (two cameras, or the same one twice)
+    interleaved would scramble tracking, so a new tab takes over and the previous one is closed."""
+    global _sender
+    await ws.accept()
+    if pipeline.CAMERA_SOURCE != "browser":
+        await ws.close(code=1008, reason="CAMERA_SOURCE is not browser")
+        return
+    previous, _sender = _sender, ws
+    if previous is not None:
+        try:
+            await previous.close(code=4000, reason="another tab took over the camera")
+        except RuntimeError:  # already closed
+            pass
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            if ws is not _sender:
+                break
+            if len(data) <= MAX_FRAME_BYTES and data[:2] == b"\xff\xd8":  # JPEG only; decoded in the camera loop
+                shared.put_browser_frame(data)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if _sender is ws:
+            _sender = None
 
 
 @app.get("/stream.mjpg")
