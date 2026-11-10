@@ -19,3 +19,5 @@ mobileclip*.ts
 
 # Local config (BE_URL, ...)
 .env
+.env.*
+!.env.example

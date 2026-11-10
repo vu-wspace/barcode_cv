@@ -1,0 +1,35 @@
+[project]
+name = "vision"
+version = "0.1.0"
+description = "Packing inspection: camera, YOLO, barcode / OCR, operator state API"
+requires-python = ">=3.13"
+dependencies = [
+    "clip",
+    "fastapi>=0.162.2",
+    "lap>=0.5.12",
+    "pytesseract>=0.3.13",
+    "python-dotenv>=1.2.4",
+    "torch",
+    "torchvision",
+    "ultralytics>=8.4.208",
+    "uvicorn>=0.30",
+    "zxing-cpp>=3.1.1",
+]
+
+[dependency-groups]
+dev = ["python-barcode>=0.16.1"]  # barcode_reader.py self-check only
+
+[tool.uv]
+package = false  # an app run with `python -m vision`, not a library to build
+
+# CPU-only PyTorch: the default PyPI wheels on Linux pull several GB of CUDA libraries into the Docker image.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+# Ultralytics installs CLIP from git at runtime when YOLOE encodes text prompts; pinned here instead
+clip = { git = "https://github.com/ultralytics/CLIP.git", rev = "7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40" }

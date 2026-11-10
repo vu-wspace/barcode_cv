@@ -3,8 +3,14 @@
 Camera -> Box (OBB) + Track ID -> box barcode -> BE checklist (Expected)
        -> Items (segmentation inside the box) + Track ID -> item barcode -> Scanned; Visual count
        -> Xong: Compare -> NG (back to packing) | OK -> Seal -> Xong -> result to BE
+
+run() is the camera loop; it publishes the annotated frame and the operator state to a Shared object that the
+HTTP API (vision/__main__.py) serves to the web UI, and takes "Xong" presses from it.
 """
+import os
+import queue
 import statistics
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -14,16 +20,14 @@ import cv2
 import numpy as np
 from ultralytics import YOLOE
 
-import ui
-from barcode_reader import ocr_ean13_async, read_barcodes
-from be_client import fetch_checklist, send_result
-from inspection import BoxSession, assign, box_code, inside, obb_from_mask
+from vision.barcode_reader import ocr_ean13_async, read_barcodes
+from vision.be_client import fetch_checklist, send_result
+from vision.inspection import BoxSession, assign, box_code, inside, obb_from_mask
 
 # Box: detect + OBB only. YOLOE gives a mask internally; only its outline is used, to get the rotation.
 # shortcut: zero-shot is less accurate than a trained model, swap in a trained OBB model (train_obb.py) once it scores well.
-BOX_MODEL, BOX_PROMPT = "yoloe-26s-seg.pt", ["box"]
-model = YOLOE(BOX_MODEL)
-model.set_classes(BOX_PROMPT, model.get_text_pe(BOX_PROMPT))
+model = YOLOE("yoloe-26s-seg.pt")
+model.set_classes(["box"], model.get_text_pe(["box"]))
 
 # Items: segment what is inside boxes; prompt-free = ~4.5k built-in classes, no prompts needed.
 inner = YOLOE("yoloe-26s-seg-pf.pt")
@@ -55,13 +59,31 @@ BOX_TRACKER = str(Path(__file__).with_name("box_tracker.yaml"))
 # last detection, so items / barcodes / seal on it are not lost on the frames in between.
 HOLD_S = 1.0
 ROTATE_HINT_S = 1.5  # an item unread this long gets the "rotate the code" hint
+CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "0")  # webcam index (0) or a stream URL (rtsp://..., http://...)
 
 
-def open_camera():
-    """Own capture instead of source=0: Ultralytics opens the webcam at 640x480, too coarse to decode barcodes."""
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # driver clamps to the camera's max (1280x720 on this laptop)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+class Shared:
+    """Hand-over between the camera loop (writer) and the HTTP API (readers)."""
+
+    def __init__(self):
+        self.jpeg = None  # latest annotated frame
+        self.state = {}  # latest operator state, see snapshot()
+        self.frame_ready = threading.Condition()
+        self.xong = queue.Queue()  # "Xong" presses from the web UI
+
+    def publish(self, frame, state):
+        jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
+        with self.frame_ready:
+            self.jpeg, self.state = jpeg, state
+            self.frame_ready.notify_all()
+
+
+def open_camera(source=CAMERA_SOURCE):
+    """Webcam by index at its max resolution (Ultralytics' default 640x480 is too coarse for barcodes), or a URL."""
+    cap = cv2.VideoCapture(int(source) if source.isdigit() else source)
+    if source.isdigit():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # driver clamps to the camera's max (1280x720 on the test laptop)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     return cap
 
 
@@ -108,6 +130,25 @@ def seal_fraction(img, boxes):
     return seals, sum(cv2.contourArea(s.astype(np.float32)) for s in seals) / box_area
 
 
+def snapshot(session, now, message, fps):
+    """Operator state for the web UI (JSON-safe)."""
+    state = {"box_id": None, "stage": "idle", "message": message, "fps": round(fps, 1)}
+    if session is None:
+        return state
+    got = session.scanned(now)  # items still in the box
+    known = {e["item_id"] for e in session.expected or []}
+    cmp = session.last_compare
+    return {**state, "box_id": session.box_id, "stage": session.state, "loading": session.loading,
+            "has_checklist": session.expected is not None,
+            "checklist": [{"item_id": e["item_id"], "scanned": got[e["item_id"]], "quantity": e["quantity"]}
+                          for e in session.expected or []],
+            "not_in_order": {c: n for c, n in got.items() if c not in known} if session.expected is not None else {},
+            "visual_count": len(session.present(now)), "scanned_count": sum(got.values()),
+            "unread_hint": len(session.unread(now, ROTATE_HINT_S)),
+            "ng": {k: cmp[k] for k in ("missing", "extra", "wrong", "unread", "no_checklist")}
+            if cmp and cmp["result"] == "NG" and session.state == "packing" else None}
+
+
 def report(r):
     print(f"\n=== BOX {r['box_id']}: {r['result']}  seal: {r['seal_status']} ===")
     for item, n in r["items"].items():
@@ -127,22 +168,26 @@ def finish(session, cmp, seal_status, frame):
     report(send_result(result, cv2.imencode(".jpg", frame)[1].tobytes()))
 
 
-if __name__ == "__main__":
+def run(shared, source=CAMERA_SOURCE):
     session, done_ids = None, set()  # one box at a time on the packing table
     box_votes = deque()  # (time, box barcode) reads; see inspection.box_code
     held = {}  # box track id -> (OBB, time last detected)
     checklist_job = ocr_job = None  # (future, ...) running in the background
     seal_base, seal_fracs = 0.0, deque(maxlen=SEAL_WINDOW)
-    ri, items, k, message, clicks = None, [], 0, "", []
+    ri, items, k, message, fps, last = None, [], 0, "", 0.0, time.time()
 
-    cap = open_camera()
-    cv2.namedWindow(ui.WINDOW)
-    cv2.setMouseCallback(ui.WINDOW, lambda ev, x, y, *_: clicks.append((x, y)) if ev == cv2.EVENT_LBUTTONDOWN else None)
-    while True:  # press q to stop
+    cap = open_camera(source)
+    while True:
         ok, img = cap.read()
-        if not ok:
-            break
+        if not ok:  # unplugged webcam or dropped stream: keep the service up and retry
+            message = f"Mất tín hiệu camera ({source}), đang kết nối lại…"
+            shared.publish(np.zeros((360, 640, 3), np.uint8), snapshot(session, time.time(), message, 0.0))
+            cap.release()
+            time.sleep(2)
+            cap = open_camera(source)
+            continue
         now, k = time.time(), k + 1
+        fps, last = 0.9 * fps + 0.1 / max(now - last, 1e-3), now
         r = model.track(img, persist=True, conf=BOX_CONF, imgsz=BOX_IMGSZ, tracker=BOX_TRACKER, verbose=False)[0]
         detected = {tid: obb_from_mask(p) for tid, p in zip(ids(r), r.masks.xy if r.masks is not None else [])
                     if tid is not None and len(p) >= 3}  # minAreaRect needs a real outline
@@ -171,12 +216,17 @@ if __name__ == "__main__":
             ocr_job = None
             try:
                 code = fut.result()
-            except Exception as e:  # e.g. OCR model download failed offline: lose this read, not the app
+            except Exception as e:  # e.g. Tesseract missing: lose this read, not the app
                 print(f"[ocr] failed: {e}")
                 code = ""
-            if code and ocr_session is session:  # by track id, not position: the item may have moved since
+            # OCR is the least reliable reader: accept only a code of this order. Anything else leaves the item
+            # unread (still NG, with the "rotate the code" hint) instead of counting a possible misread.
+            expected = {bc for e in session.expected or [] for bc in e["barcodes"]} if session else set()
+            if code and ocr_session is session and code in expected:  # by track id: the item may have moved since
                 session.read_item(item_tid, code)
                 print(f"[scan] box {session.box_id or '?'}  item #{item_tid}: {code} (OCR)")
+            elif code:
+                print(f"[ocr] ignored {code}: not in the checklist of box {session and session.box_id}")
         if ocr_job is None and session is not None:
             for quad in missed:
                 c = tuple(map(float, quad.mean(0)))
@@ -224,14 +274,13 @@ if __name__ == "__main__":
             cv2.polylines(frame, [s], True, (255, 128, 0), 2)
         for text, (cx, cy) in reads:  # decoded codes, written where the barcode is
             cv2.putText(frame, text, (int(cx) - 80, int(cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        view, button = ui.render(frame, session, now, message, ROTATE_HINT_S)
-        cv2.imshow(ui.WINDOW, view)
-        key = cv2.waitKey(1)
-        if key == ord("q"):
-            break
 
-        # Xong (Enter / Space / click): Compare -> NG | OK -> seal -> Xong -> result
-        if key in (13, 32) or any(ui.hit(button, p) for p in clicks):
+        # Xong from the web UI: Compare -> NG | OK -> seal -> Xong -> result
+        pressed = False
+        while not shared.xong.empty():
+            shared.xong.get_nowait()
+            pressed = True
+        if pressed:
             if session is None or session.box_id is None:
                 message = "Chưa đọc được mã hộp"
             elif session.state == "packing":
@@ -252,8 +301,5 @@ if __name__ == "__main__":
                 box_votes.clear()
                 message = f"Đã gửi {session.box_id}: OK, seal {seal}"
                 session = None
-        clicks.clear()
 
-    cap.release()
-    if session is not None and session.box_id:
-        print(f"[warn] box {session.box_id} not finished (Xong not pressed); no result sent")
+        shared.publish(frame, snapshot(session, now, message, fps))

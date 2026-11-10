@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 import cv2
 import numpy as np
 
-from barcode_reader import ean13_ok
+from vision.barcode_reader import ean13_ok
 
 PRESENT_S = 3.0  # an item not seen for this long has left the box (or was a passing hand) and no longer counts
 BOX_VOTES = 2  # reads of the same box barcode (within BOX_WINDOW_S) before it is trusted as box_id

@@ -1,10 +1,10 @@
-"""BE for the packing inspection: checklists in, inspection results out, stored in PostgreSQL.
+"""Backend service: checklists in, inspection results out, stored in PostgreSQL.
 
-    uv run uvicorn server:app --app-dir src/barcode_cv --host 0.0.0.0 --port 8000
-    uv run python src/barcode_cv/server.py seed [mock_checklist.json]   # load checklists from a JSON file
-    uv run python src/barcode_cv/server.py check                         # self-check against DATABASE_URL
+    uv run uvicorn app.server:app --host 0.0.0.0 --port 8000
+    uv run python -m app.server seed <checklist.json>   # load checklists ({box_id: [items]}, like mock_checklist.json)
+    uv run python -m app.server check                   # self-check against DATABASE_URL
 
-Needs DATABASE_URL in .env, e.g. postgresql://postgres:<password>@localhost:5432/barcode_cv
+Needs DATABASE_URL, e.g. postgresql://postgres:<password>@localhost:5432/barcode_cv
 """
 import base64
 import binascii
@@ -162,12 +162,10 @@ def check():
     """End-to-end self-check through the HTTP API against DATABASE_URL; removes its own rows."""
     import uuid
 
-    import cv2
-    import numpy as np
     from fastapi.testclient import TestClient
 
     box = f"CHECK-{uuid.uuid4().hex[:8]}"
-    jpeg = cv2.imencode(".jpg", np.zeros((8, 8, 3), np.uint8))[1].tobytes()
+    jpeg = b"\xff\xd8\xff\xe0 test image \xff\xd9"  # only the JPEG start marker is validated
     body = {"inspection_id": str(uuid.uuid4()), "box_id": box, "result": "NG", "seal_status": "n/a", "qty": 1,
             "items": {"A": 1}, "missing": {"A": 1}, "time": "2026-11-10T09:30:00+07:00",
             "image_jpeg_b64": base64.b64encode(jpeg).decode(), "image": "results/x.jpg"}

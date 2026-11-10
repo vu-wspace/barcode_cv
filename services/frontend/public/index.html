@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiểm tra đóng gói</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <section class="video">
+      <img id="stream" alt="Camera bàn đóng gói">
+      <div id="video-error" class="overlay" hidden>Không có hình từ vision service</div>
+    </section>
+    <aside class="panel">
+      <h1 id="box">Đưa hộp vào bàn</h1>
+      <p id="stage" class="muted"></p>
+      <p id="checklist-status"></p>
+      <ul id="checklist"></ul>
+      <ul id="not-in-order" class="bad"></ul>
+      <p id="counts" class="muted"></p>
+      <p id="unread" class="warn"></p>
+      <div id="ng" hidden>
+        <h2 class="bad">NG → quay lại xếp hàng</h2>
+        <ul id="ng-reasons" class="bad"></ul>
+      </div>
+      <p id="message"></p>
+      <button id="xong" type="button">XONG <kbd>Enter</kbd></button>
+      <p id="status" class="muted"></p>
+    </aside>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

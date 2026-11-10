@@ -1,7 +1,7 @@
 """Build a "box" OBB dataset from the webcam, then fine-tune YOLO26-OBB on it.
 
-    uv run python src/barcode_cv/train_obb.py collect   # SPACE = save frame (only when green boxes are right), q = quit
-    uv run python src/barcode_cv/train_obb.py train
+    uv run python -m vision.train_obb collect   # SPACE = save frame (only when green boxes are right), q = quit
+    uv run python -m vision.train_obb train
 """
 import sys
 from pathlib import Path
@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO, YOLOE
 
-from inspection import obb_from_mask
+from vision.inspection import obb_from_mask
 
 DATA = Path("datasets/box_obb")
 

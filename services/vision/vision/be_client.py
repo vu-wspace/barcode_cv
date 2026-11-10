@@ -1,8 +1,8 @@
-"""API client to the BE (server.py).
+"""API client to the backend service (services/backend).
 
     GET  {BE_URL}/boxes/{box_id}/checklist -> [{"item_id", "barcodes": [...], "quantity"}], 404 = unknown box
     POST {BE_URL}/inspections               <- result JSON with "inspection_id" (+ "image_jpeg_b64")
-Without BE_URL in .env, the checklist comes from mock_checklist.json and results are only stored locally.
+Without BE_URL, the checklist comes from MOCK_CHECKLIST (mock_checklist.json) and results are only stored locally.
 """
 import base64
 import json
@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 BE_URL = os.getenv("BE_URL", "").rstrip("/")
-MOCK = Path("mock_checklist.json")
-OUTBOX = Path("results")
+MOCK = Path(os.getenv("MOCK_CHECKLIST", "mock_checklist.json"))
+OUTBOX = Path(os.getenv("RESULTS_DIR", "results"))  # local copy of every result + image
 _pool = ThreadPoolExecutor(max_workers=2)  # network never blocks the camera loop
 
 

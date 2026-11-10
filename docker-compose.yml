@@ -1,0 +1,61 @@
+# Packing inspection: db + backend + frontend, and the vision service under the "vision" profile.
+#   docker compose up -d --build                    # db, backend, frontend (vision run natively, see README)
+#   docker compose --profile vision up -d --build   # + vision in Docker (camera via CAMERA_SOURCE URL, or Linux /dev/video0)
+# Open http://localhost:${FRONTEND_PORT:-8080}
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: barcode_cv
+    volumes:
+      - pgdata:/var/lib/postgresql  # postgres 18 keeps its data under this directory
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "barcode_cv"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: services/backend
+    environment:
+      # a password with @ : / ? # % must be URL-encoded here
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/barcode_cv
+    volumes:
+      - ./services/vision/mock_checklist.json:/app/mock_checklist.json:ro  # for `python -m app.server seed`
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: services/frontend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    environment:
+      BACKEND_URL: http://backend:8000
+      # vision in Docker: http://vision:8090 | vision run natively on the host: http://host.docker.internal:8090
+      VISION_URL: ${VISION_URL:-http://vision:8090}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  vision:
+    build: services/vision
+    profiles: [vision]
+    environment:
+      CAMERA_SOURCE: ${CAMERA_SOURCE_DOCKER:-0}  # stream URL (rtsp://..., http://...), or 0 with the device below
+      BE_URL: http://backend:8000
+    volumes:
+      - vision-data:/data  # model weights (downloaded once) + local copy of results
+    # Linux only: pass the webcam in (Docker Desktop on Windows/macOS cannot)
+    # devices:
+    #   - /dev/video0:/dev/video0
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  vision-data:
