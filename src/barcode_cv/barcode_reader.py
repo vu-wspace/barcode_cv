@@ -61,6 +61,36 @@ _ocr = None
 _ocr_pool = ThreadPoolExecutor(max_workers=1)  # one OCR at a time; the camera loop never waits for it
 
 
+def ean13_from_text_boxes(boxes, texts):
+    """The printed EAN-13 among OCR text boxes, or "".
+
+    Only a run of digit-only boxes on one text line counts (the digits are printed as "8 935106 211321", often split
+    into several boxes); the run must be exactly 13 digits with a valid check digit. Digits are never joined across
+    lines or out of a longer number: on real frames that turned a shipping label ("X55277605433" over
+    "VN5D6W5C4U2R") into the checksum-valid "5527760543356".
+    """
+    lines = []  # [y center, height, [texts left to right]]
+    for box, text in sorted(zip(boxes, texts), key=lambda bt: np.asarray(bt[0])[:, 0].min()):
+        box = np.asarray(box)
+        yc, height = box[:, 1].mean(), np.ptp(box[:, 1])
+        line = next((ln for ln in lines if abs(ln[0] - yc) < max(ln[1], height) / 2), None)
+        if line is None:
+            lines.append([yc, height, [text]])
+        else:
+            line[2].append(text)
+    for _, _, line_texts in lines:
+        run = ""
+        for text in line_texts + [None]:  # None closes the last run
+            s = None if text is None else text.replace(" ", "").replace("-", "")
+            if s and s.isdigit():
+                run += s
+                continue
+            if len(run) == 13 and ean13_ok(run):
+                return run
+            run = ""
+    return ""
+
+
 def ocr_ean13(img, quad):
     """Fallback: OCR the digits printed under the bars; only a checksum-valid EAN-13 is returned, else ""."""
     global _ocr
@@ -87,6 +117,20 @@ if __name__ == "__main__":  # self-check: a small, rotated, blurred EAN-13 like 
     from barcode.writer import ImageWriter
 
     assert ean13_ok("8935106211321") and not ean13_ok("8935106211322") and not ean13_ok("79902113")
+
+    def box(x, y, w=40, h=20):  # OCR text box corners
+        return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+    # real OCR outputs from webcam frames (box positions simplified)
+    assert ean13_from_text_boxes([box(0, 100, 10), box(15, 100, 120)], ["8", "935106211321"]) == "8935106211321"
+    assert ean13_from_text_boxes([box(0, 0), box(0, 100, 10), box(15, 100, 120)],
+                                 ["Ngày", "8", "935106-211321"]) == "8935106211321"
+    assert ean13_from_text_boxes([box(15, 100, 120), box(0, 100, 10)], ["935106211321", "8"]) == "8935106211321"
+    assert ean13_from_text_boxes([box(0, 0, 120), box(0, 40), box(0, 45, 120)],
+                                 ["X55277605433", "Mā vân don", "VN5D6W5C4U2R"]) == ""  # label: was a false read
+    assert ean13_from_text_boxes([box(0, 0, 10), box(0, 40, 120)], ["8", "935106211321"]) == ""  # different lines
+    assert ean13_from_text_boxes([box(0, 0, 200)], ["189351062113210"]) == ""  # 13 valid digits inside a longer number
+    assert ean13_from_text_boxes([box(0, 0, 120)], ["8935106211322"]) == ""  # bad check digit
+    assert ean13_from_text_boxes([], []) == ""
     buf = io.BytesIO()
     barcode.get("ean13", "893510621132", writer=ImageWriter()).write(buf)
     code = cv2.imdecode(np.frombuffer(buf.getvalue(), np.uint8), cv2.IMREAD_COLOR)
